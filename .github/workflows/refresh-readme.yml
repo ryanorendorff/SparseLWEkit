@@ -100,6 +100,17 @@ jobs:
             --output out/partial-${{ matrix.id }}.csv \
             --jobs 2
 
+      - name: Show estimates for ID ${{ matrix.id }}
+        if: always()
+        run: |
+          echo "::group::Estimates for parameter set ${{ matrix.id }}"
+          if [[ -f out/partial-${{ matrix.id }}.csv ]]; then
+            (command -v column >/dev/null && column -s, -t out/partial-${{ matrix.id }}.csv) || cat out/partial-${{ matrix.id }}.csv
+          else
+            echo "(no partial CSV produced — estimator failed before writing output)"
+          fi
+          echo "::endgroup::"
+
       - name: Upload partial CSV
         uses: actions/upload-artifact@v4
         with:
@@ -113,6 +124,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - name: Checkout (full history, with submodules)
         uses: actions/checkout@v4
@@ -133,37 +145,69 @@ jobs:
           path: partials
           pattern: estimates-*
 
-      - name: Merge partial CSVs into the canonical estimates file
-        run: |
-          set -euo pipefail
-          python3 -m pip install --quiet --break-system-packages pandas
-          python3 - <<'PY'
-          import glob
-          import pandas as pd
-          paths = sorted(glob.glob("partials/estimates-*/partial-*.csv"))
-          if not paths:
-              raise SystemExit("no partial CSVs found under partials/")
-          frames = [pd.read_csv(p) for p in paths]
-          merged = pd.concat(frames, ignore_index=True).sort_values("ID").reset_index(drop=True)
-          merged.to_csv("src/data/lattice_estimator_estimates.csv", index=False)
-          print(merged.to_string(index=False))
-          PY
-
-      - name: Regenerate README
+      - name: Install Python deps for merge + README
         run: |
           set -euo pipefail
           python3 -m pip install --quiet --break-system-packages -r src/requirements.txt
-          make readme
 
-      - name: Commit and push if anything changed
+      - name: Merge partial CSVs into the canonical estimates file
+        run: python3 src/merge_estimates.py 'partials/estimates-*/partial-*.csv'
+
+      - name: Regenerate README
+        run: make readme
+
+      - name: Open auto-merge PR if anything changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -z "$(git status --porcelain)" ]]; then
-            echo "No changes — nothing to commit."
+
+          # Check only the paths we actually commit — actions/download-artifact
+          # leaves an untracked `partials/` dir that would otherwise make a
+          # plain `git status --porcelain` always non-empty.
+          tracked_paths=(src/lattice_estimator src/data/lattice_estimator_estimates.csv README.md)
+          if [[ -z "$(git status --porcelain -- "${tracked_paths[@]}")" ]]; then
+            echo "No changes to estimator pin, estimates, or README — nothing to commit."
             exit 0
           fi
+
+          base="${GITHUB_REF_NAME}"
+          # GITHUB_RUN_ID disambiguates against same-second collisions if two
+          # workflow runs ever reach this step concurrently.
+          branch="chore/refresh-readme-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
+          short_sha="${{ needs.prepare.outputs.short_sha }}"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/lattice_estimator src/data/lattice_estimator_estimates.csv README.md
-          git commit -m "chore: monthly estimator refresh (lattice-estimator ${{ needs.prepare.outputs.short_sha }})"
-          git push origin HEAD:${GITHUB_REF_NAME}
+
+          git checkout -b "$branch"
+          git add -- "${tracked_paths[@]}"
+          git commit -m "chore: monthly estimator refresh (lattice-estimator ${short_sha})"
+          git push origin "$branch"
+
+          body=$(cat <<EOF
+          Automated refresh from the \`Refresh README\` workflow.
+
+          - lattice-estimator submodule resolved to upstream main HEAD: \`${short_sha}\`
+          - Re-ran the estimator across all parameter sets in \`src/data/parameter_db.csv\`
+          - Regenerated \`README.md\` from the refreshed CSV
+
+          Triggered by \`${GITHUB_EVENT_NAME}\` against base \`${base}\` (run [#${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})).
+
+          Auto-merge is enabled for this PR; it will land once required checks pass (or immediately if none are required).
+          EOF
+          )
+
+          pr_url=$(gh pr create \
+            --base "$base" \
+            --head "$branch" \
+            --title "chore: monthly estimator refresh (lattice-estimator ${short_sha})" \
+            --body "$body")
+
+          echo "Opened PR: $pr_url"
+
+          # Auto-merge only this PR. Repo must have "Allow auto-merge" enabled
+          # in Settings → General → Pull Requests for this to take effect.
+          if ! gh pr merge --auto --squash --delete-branch "$pr_url"; then
+            echo "::warning::Could not enable auto-merge on $pr_url. Confirm 'Allow auto-merge' is enabled in repo Settings → General → Pull Requests, then merge the PR manually."
+          fi
