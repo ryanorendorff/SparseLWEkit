@@ -25,10 +25,13 @@ jobs:
       ids: ${{ steps.matrix.outputs.ids }}
       changed: ${{ steps.changed.outputs.changed }}
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout (with submodules, full history)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           submodules: recursive
+          # fetch-depth: 0 so the change-detection step can ask git
+          # which commit last touched the estimates CSV.
+          fetch-depth: 0
 
       - name: Bump lattice-estimator submodule to upstream HEAD
         id: bump
@@ -53,11 +56,16 @@ jobs:
           if [[ "$bumped" != "$committed" ]]; then
             echo "estimator moved $committed -> $bumped"
             result="true"
-          elif [[ "$(python3 ci/parameters_diverged.py)" == "true" ]]; then
-            echo "parameter_db.csv differs from cached estimates"
-            result="true"
+          elif drift=$(python3 ci/parameters_diverged.py); then
+            if [[ "$drift" == "true" ]]; then
+              echo "parameter_db.csv differs from cached estimates"
+              result="true"
+            else
+              echo "estimator and parameter_db unchanged — downstream jobs will skip"
+            fi
           else
-            echo "estimator and parameter_db unchanged — downstream jobs will skip"
+            echo "parameters_diverged.py crashed — assuming refresh needed"
+            result="true"
           fi
           # TEMPORARY: force result=true to exercise the full pipeline
           # against an unchanged upstream. Remove with the push trigger.

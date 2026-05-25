@@ -1,35 +1,35 @@
-"""Print 'true' if parameter_db.csv's parameter rows differ from the
-ones recorded in lattice_estimator_estimates.csv, else 'false'.
+"""Print 'true' if parameter_db.csv has changed since the commit that
+last updated the cached estimates CSV, else 'false'.
 
-Used by the refresh-readme CI workflow to decide whether estimates
-need re-running even when the lattice-estimator submodule has not moved.
+Compares via git so any change to parameter_db.csv (parameter values,
+Origin URLs, whitespace) is caught. Requires fetch-depth: 0 on the
+caller's checkout. Fail-closed: any unexpected error prints 'true'
+so a corrupt repo state forces a refresh rather than silently skipping.
 """
-import csv
+import subprocess
 import sys
 
-PARAM_COLS = ("ID", r"$\log_2(n)$", "σ", r"$\log_2(q)$", "$h$")
-DB_PATH = "src/data/parameter_db.csv"
-EST_PATH = "src/data/lattice_estimator_estimates.csv"
+DB = "src/data/parameter_db.csv"
+EST = "src/data/lattice_estimator_estimates.csv"
 
 
-def _rows(path):
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        missing = [c for c in PARAM_COLS if c not in (reader.fieldnames or [])]
-        if missing:
-            sys.exit(f"{path}: missing columns {missing}")
-        return sorted(tuple(r[c] for c in PARAM_COLS) for r in reader)
+def _run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True, check=True)
 
 
 def main():
-    db = _rows(DB_PATH)
     try:
-        est = _rows(EST_PATH)
-    except FileNotFoundError:
-        # No cached estimates → refresh needed.
+        last = _run(["git", "log", "-1", "--format=%H", "--", EST]).stdout.strip()
+        if not last:
+            print("true")
+            return
+        diff = subprocess.run(
+            ["git", "diff", "--quiet", last, "--", DB], capture_output=True
+        )
+        print("true" if diff.returncode != 0 else "false")
+    except Exception as e:
+        print(f"parameters_diverged: {e}", file=sys.stderr)
         print("true")
-        return
-    print("true" if db != est else "false")
 
 
 if __name__ == "__main__":

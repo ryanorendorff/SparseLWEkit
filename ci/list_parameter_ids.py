@@ -24,6 +24,9 @@ def main():
                     f"ID {raw!r} in {path} is not an integer; "
                     "refusing to expand matrix."
                 )
+    if len(set(ids)) != len(ids):
+        dupes = sorted({x for x in ids if ids.count(x) > 1})
+        sys.exit(f"{path}: duplicate IDs {dupes}; matrix shards would collide.")
     print(json.dumps(ids))
 
 
