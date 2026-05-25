@@ -5,6 +5,8 @@ on:
     # 06:00 UTC on the 1st of each month.
     - cron: "0 6 1 * *"
   workflow_dispatch:
+  push:
+    branches: [ci/refresh-readme]  # TEMPORARY: remove after test run
 
 # Read-only by default. Only the commit job upgrades to write.
 permissions:
@@ -41,18 +43,27 @@ jobs:
             echo "short_sha=$short"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Detect whether upstream moved
+      - name: Detect whether a refresh is needed
         id: changed
         run: |
           set -euo pipefail
           committed=$(git ls-tree HEAD src/lattice_estimator | awk '{print $3}')
-          if [[ "${{ steps.bump.outputs.sha }}" == "$committed" ]]; then
-            echo "estimator unchanged at $committed — downstream jobs will be skipped"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+          bumped="${{ steps.bump.outputs.sha }}"
+          result="false"
+          if [[ "$bumped" != "$committed" ]]; then
+            echo "estimator moved $committed -> $bumped"
+            result="true"
+          elif [[ "$(python3 ci/parameters_diverged.py)" == "true" ]]; then
+            echo "parameter_db.csv differs from cached estimates"
+            result="true"
           else
-            echo "estimator moved $committed -> ${{ steps.bump.outputs.sha }}"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "estimator and parameter_db unchanged — downstream jobs will skip"
           fi
+          # TEMPORARY: force result=true to exercise the full pipeline
+          # against an unchanged upstream. Remove with the push trigger.
+          result="true"
+          echo "TEST OVERRIDE: forcing changed=$result"
+          echo "changed=$result" >> "$GITHUB_OUTPUT"
 
       - name: Compute shard matrix from parameter_db.csv
         id: matrix
@@ -79,7 +90,7 @@ jobs:
       fail-fast: false
       matrix:
         id: ${{ fromJson(needs.prepare.outputs.ids) }}
-    timeout-minutes: 350
+    timeout-minutes: 60
     steps:
       - name: Install git in container
         run: |
@@ -154,8 +165,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Python deps
-        run: python3 -m pip install --quiet --break-system-packages -r src/requirements.txt
+      - name: Create venv and install Python deps
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet -r src/requirements.txt
 
       - name: Download all partial CSVs (scoped to this run)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -167,11 +181,11 @@ jobs:
 
       - name: Merge partial CSVs into the canonical estimates file
         run: |
-          python3 ci/merge_estimates.py 'partials/estimates-*/partial-*.csv' \
+          .venv/bin/python ci/merge_estimates.py 'partials/estimates-*/partial-*.csv' \
             --parameter-db src/data/parameter_db.csv
 
       - name: Regenerate README
-        run: make readme
+        run: PATH="$PWD/.venv/bin:$PATH" make readme
 
       - name: Upload regenerated README + estimates CSV
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
